@@ -54,7 +54,7 @@ def load_fits_format(file_path: str) -> tuple:
 
 def load_csv_from_nexsci_api(planet_name: str) -> pd.DataFrame:
     print(f"[API] Fetching ephemeris data for {planet_name} from NEXScI API...")
-    base_url = "https://exoplanetarchive.ipac.caltech.edu/TAP/sync"
+    base_url = "https://archive.stsci.edu/tess/tic_ctl.html"
     query = f"select pl_name, pl_orbper, pl_trandep, pl_tranmid from pscomppars where pl_name = '{planet_name}'"
     params = {
         "query": query,
