@@ -1,0 +1,188 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+import numpy as np
+
+
+from data_prep import split_dataset, z_score_normalize, ExoplanetDataset
+
+
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=0.25, gamma=2.0, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+      
+        bce_loss = F_bce = nn.functional.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        probs = torch.sigmoid(inputs)
+        p_t = probs * targets + (1 - probs) * (1 - targets)
+        loss = bce_loss * ((1 - p_t) ** self.gamma)
+
+        if self.alpha >= 0:
+            alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+            loss = alpha_t * loss
+
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:
+            return loss
+
+class SimpleExoplanetCNN(nn.Module):
+    def __init__(self, seq_len):
+        super(SimpleExoplanetCNN, self).__init__()
+        self.conv1 = nn.Conv1d(1, 16, kernel_size=5, stride=1, padding=2)
+        self.bn1 = nn.BatchNorm1d(16)
+        self.pool1 = nn.MaxPool1d(2)
+        
+        self.conv2 = nn.Conv1d(16, 32, kernel_size=5, stride=1, padding=2)
+        self.bn2 = nn.BatchNorm1d(32)
+        self.pool2 = nn.MaxPool1d(2)
+        
+        self.dropout = nn.Dropout(0.4) 
+        self.fc = nn.Linear(32 * (seq_len // 4), 1)
+
+    def forward(self, x):
+        x = self.pool1(nn.functional.relu(self.bn1(self.conv1(x))))
+        x = self.pool2(nn.functional.relu(self.bn2(self.conv2(x))))
+        x = x.view(x.size(0), -1)
+        x = self.dropout(x)
+        x = self.fc(x)  
+        return x
+
+
+class EarlyStopping:
+    def __init__(self, patience=5, min_delta=1e-4, checkpoint_path="best_model.pt"):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.checkpoint_path = checkpoint_path
+        self.best_loss = float('inf')
+        self.counter = 0
+        self.early_stop = False
+
+    def __call__(self, val_loss, model):
+        if val_loss < self.best_loss - self.min_delta:
+            self.best_loss = val_loss
+            self.counter = 0
+          
+            torch.save(model.state_dict(), self.checkpoint_path)
+            print(f"--> Saved new best model to {self.checkpoint_path} (Val Loss: {val_loss:.6f})")
+        else:
+            self.counter += 1
+            print(f"--> Early stopping counter: {self.counter}/{self.patience}")
+            if self.counter >= self.patience:
+                self.early_stop = True
+
+
+def train_model(model, train_loader, val_loader, epochs=20, lr=0.001):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    
+   
+    criterion = FocalLoss(alpha=0.25, gamma=2.0)
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+    
+  
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
+    early_stopping = EarlyStopping(patience=5, checkpoint_path="best_exoplanet_model.pt")
+
+    for epoch in range(epochs):
+        model.train()
+        train_loss = 0.0
+        correct_train = 0
+        total_train = 0
+        
+        for batch_x, batch_y in train_loader:
+            batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+            
+            optimizer.zero_grad()
+            logits = model(batch_x)
+            loss = criterion(logits, batch_y)
+            loss.backward()
+            optimizer.step()
+            
+            train_loss += loss.item() * batch_x.size(0)
+            predictions = (torch.sigmoid(logits) >= 0.5).float()
+            correct_train += (predictions == batch_y).sum().item()
+            total_train += batch_y.size(0)
+            
+        epoch_train_loss = train_loss / total_train
+        epoch_train_acc = correct_train / total_train
+        
+       
+        model.eval()
+        val_loss = 0.0
+        correct_val = 0
+        total_val = 0
+        
+        with torch.no_grad():
+            for batch_x, batch_y in val_loader:
+                batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+                logits = model(batch_x)
+                loss = criterion(logits, batch_y)
+                
+                val_loss += loss.item() * batch_x.size(0)
+                predictions = (torch.sigmoid(logits) >= 0.5).float()
+                correct_val += (predictions == batch_y).sum().item()
+                total_val += batch_y.size(0)
+                
+        epoch_val_loss = val_loss / total_val
+        epoch_val_acc = correct_val / total_val
+        
+       
+        scheduler.step(epoch_val_loss)
+        current_lr = optimizer.param_groups[0]['lr']
+        
+        print(f"Epoch {epoch+1:02d}/{epochs:02d} | "
+              f"Train Loss: {epoch_train_loss:.4f} - Train Acc: {epoch_train_acc:.4f} | "
+              f"Val Loss: {epoch_val_loss:.4f} - Val Acc: {epoch_val_acc:.4f} | LR: {current_lr}")
+        
+        
+        early_stopping(epoch_val_loss, model)
+        if early_stopping.early_stop:
+            print("Early stopping triggered. Training terminated.")
+            break
+            
+   
+    model.load_state_dict(torch.load("best_exoplanet_model.pt"))
+    return model
+
+if __name__ == "__main__":
+   
+    num_samples = 1500
+    seq_len = 200
+    
+    # Class 0: Noisy light curves (90%)
+    # Class 1: Light curves containing real transits (10%)
+    y = np.random.choice([0, 1], size=(num_samples,), p=[0.90, 0.10])
+    X = np.random.normal(1.0, 0.02, size=(num_samples, 1, seq_len))
+    
+   
+    for i in range(num_samples):
+        if y[i] == 1:
+           
+            X[i, 0, 80:120] -= 0.04
+            
+   
+    X_train, X_val, X_test, y_train, y_val, y_test = split_dataset(X, y)
+    X_train_n, X_val_n, X_test_n = z_score_normalize(X_train, X_val, X_test)
+    
+    
+    train_dataset = ExoplanetDataset(X_train_n, y_train, augment=True)
+    val_dataset = ExoplanetDataset(X_val_n, y_val, augment=False)
+    
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+    
+  
+    exoplanet_cnn = SimpleExoplanetCNN(seq_len)
+    
+  
+    print("Beginning Training Pipeline Stage...")
+    best_cnn_model = train_model(exoplanet_cnn, train_loader, val_loader, epochs=15, lr=0.001)
+    print("\nTraining Phase Complete. Model weights ready for Step 7 (Evaluation).")
