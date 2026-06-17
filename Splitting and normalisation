@@ -1,0 +1,89 @@
+import numpy as np
+from sklearn.model_selection import train_test_split
+import torch
+from torch.utils.data import Dataset, DataLoader
+
+def split_dataset(X, y, train_size=0.70, val_size=0.15, test_size=0.15, random_state=42):
+    X_train, X_temp, y_train, y_temp = train_test_split(
+        X, y, 
+        test_size=(val_size + test_size), 
+        stratify=y, 
+        random_state=random_state
+    )
+    
+    val_relative_size = val_size / (val_size + test_size)
+    X_val, X_test, y_val, y_test = train_test_split(
+        X_temp, y_temp, 
+        test_size=(1.0 - val_relative_size), 
+        stratify=y_temp, 
+        random_state=random_state
+    )
+    
+    return X_train, X_val, X_test, y_train, y_val, y_test
+
+def z_score_normalize(X_train, X_val, X_test):
+    mean = np.mean(X_train, axis=(0, 2), keepdims=True)
+    std = np.std(X_train, axis=(0, 2), keepdims=True)
+    std[std == 0] = 1e-8
+    
+    X_train_norm = (X_train - mean) / std
+    X_val_norm = (X_val - mean) / std
+    X_test_norm = (X_test - mean) / std
+    
+    return X_train_norm, X_val_norm, X_test_norm
+
+def apply_jitter(x, noise_level=0.005):
+    noise = np.random.normal(0, noise_level, size=x.shape)
+    return x + noise
+
+def apply_scaling(x, min_scale=0.98, max_scale=1.02):
+    factor = np.random.uniform(min_scale, max_scale)
+    return x * factor
+
+class ExoplanetDataset(Dataset):
+    def __init__(self, X, y, augment=False):
+        self.X = X.astype(np.float32)
+        self.y = y.astype(np.float32)
+        self.augment = augment
+
+    def __len__(self):
+        return len(self.X)
+
+    def __getitem__(self, idx):
+        x = self.X[idx]
+        y = self.y[idx]
+        
+        if self.augment and y == 1.0:
+            if np.random.rand() > 0.5:
+                x = apply_jitter(x)
+            if np.random.rand() > 0.5:
+                x = apply_scaling(x)
+                
+        return torch.tensor(x), torch.tensor(y).unsqueeze(0)
+
+if __name__ == "__main__":
+    num_samples = 1000
+    seq_len = 200
+    
+    X = np.random.normal(1.0, 0.01, size=(num_samples, 1, seq_len))
+    y = np.random.randint(0, 2, size=(num_samples,))
+    
+    X_train, X_val, X_test, y_train, y_val, y_test = split_dataset(X, y)
+    
+    X_train_n, X_val_n, X_test_n = z_score_normalize(X_train, X_val, X_test)
+    
+    train_dataset = ExoplanetDataset(X_train_n, y_train, augment=True)
+    val_dataset = ExoplanetDataset(X_val_n, y_val, augment=False)
+    test_dataset = ExoplanetDataset(X_test_n, y_test, augment=False)
+    
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+    
+    print(f"Train samples: {len(train_dataset)} (Positive class: {np.sum(y_train)})")
+    print(f"Val samples: {len(val_dataset)} (Positive class: {np.sum(y_val)})")
+    print(f"Test samples: {len(test_dataset)} (Positive class: {np.sum(y_test)})")
+    
+    for batch_x, batch_y in train_loader:
+        print("Batch features shape:", batch_x.shape)
+        print("Batch labels shape:", batch_y.shape)
+        break
