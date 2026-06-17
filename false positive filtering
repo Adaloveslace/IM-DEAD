@@ -1,0 +1,161 @@
+import numpy as np
+from scipy.stats import skew, kurtosis
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, accuracy_score
+
+def check_odd_even_depths(time, flux, period, epoch, duration):
+    midpoints = np.round((time - epoch) / period)
+    in_transit = np.abs((time - epoch) - midpoints * period) < (duration / 2.0)
+    
+    odd_transits = []
+    even_transits = []
+    
+    for idx in np.unique(midpoints):
+        mask = (midpoints == idx) & in_transit
+        if not np.any(mask):
+            continue
+        
+        local_baseline = np.median(flux[~in_transit])
+        local_depth = local_baseline - np.mean(flux[mask])
+        
+        if idx % 2 == 1:
+            odd_transits.append(local_depth)
+        else:
+            even_transits.append(local_depth)
+            
+    if len(odd_transits) == 0 or len(even_transits) == 0:
+        return 0.0
+        
+    mean_odd = np.mean(odd_transits)
+    mean_even = np.mean(even_transits)
+    
+    if (mean_odd + mean_even) <= 0:
+        return 0.0
+        
+    return np.abs(mean_odd - mean_even) / (0.5 * (mean_odd + mean_even))
+
+def evaluate_transit_geometry(folded_phase, folded_flux, duration, period):
+    phase_days = folded_phase * period
+    core_mask = np.abs(phase_days) < (duration * 0.2)
+    wing_mask = (np.abs(phase_days) >= (duration * 0.2)) & (np.abs(phase_days) <= (duration * 0.5))
+    
+    if not np.any(core_mask) or not np.any(wing_mask):
+        return 0.5
+        
+    baseline = np.median(folded_flux[np.abs(phase_days) > (duration * 0.6)])
+    core_depth = baseline - np.mean(folded_flux[core_mask])
+    wing_depth = baseline - np.mean(folded_flux[wing_mask])
+    
+    if core_depth <= 0:
+        return 1.0
+        
+    return wing_depth / core_depth
+
+def is_stellar_rotation_harmonic(detected_period, stellar_rotation_period, tolerance=0.05):
+    if stellar_rotation_period is None or stellar_rotation_period <= 0:
+        return 0.0
+        
+    harmonics = [0.5, 1.0, 2.0]
+    for h in harmonics:
+        if np.abs(detected_period - h * stellar_rotation_period) / (h * stellar_rotation_period) < tolerance:
+            return 1.0
+    return 0.0
+
+def extract_vetting_features(time, flux, folded_phase, folded_flux, detection_meta, stellar_rotation_period=None):
+    period = detection_meta["period"]
+    epoch = detection_meta["epoch"]
+    duration = detection_meta["duration"]
+    
+    odd_even_mismatch = check_odd_even_depths(time, flux, period, epoch, duration)
+    v_shape_metric = evaluate_transit_geometry(folded_phase, folded_flux, duration, period)
+    rotation_harmonic = is_stellar_rotation_harmonic(period, stellar_rotation_period)
+    
+    features = {
+        "snr": detection_meta["snr"],
+        "depth": detection_meta["depth"],
+        "duration": duration,
+        "odd_even_mismatch": odd_even_mismatch,
+        "v_shape_metric": v_shape_metric,
+        "rotation_harmonic": rotation_harmonic,
+        "skewness": skew(folded_flux),
+        "kurtosis": kurtosis(folded_flux)
+    }
+    return features
+
+def generate_mock_vetting_dataset(num_samples=1000):
+    X_features = []
+    y_labels = []
+    
+    for i in range(num_samples):
+        label = np.random.choice([0, 1], p=[0.4, 0.6]) # 1: Confirmed Planet, 0: False Positive
+        
+        if label == 1:
+            # Confirmed Planet Features (U-shaped, consistent depths, no rotation correlation)
+            snr = np.random.uniform(7.0, 30.0)
+            depth = np.random.uniform(0.005, 0.02)
+            duration = np.random.uniform(0.08, 0.20)
+            odd_even = np.random.uniform(0.0, 0.12)
+            v_shape = np.random.uniform(0.2, 0.5) # Flat-ish bottom
+            rot_harmonic = 0.0
+            skew_val = np.random.uniform(-2.0, -0.5)
+            kurt_val = np.random.uniform(1.0, 4.0)
+        else:
+            # False Positive (Eclipsing Binaries, Instrumental Blips, Stellar Spots)
+            fp_type = np.random.choice(["eb", "v-shape", "stellar_activity"])
+            snr = np.random.uniform(4.0, 25.0)
+            depth = np.random.uniform(0.003, 0.04)
+            duration = np.random.uniform(0.05, 0.25)
+            
+            if fp_type == "eb":
+                odd_even = np.random.uniform(0.3, 0.9)
+                v_shape = np.random.uniform(0.3, 0.6)
+                rot_harmonic = 0.0
+            elif fp_type == "v-shape":
+                odd_even = np.random.uniform(0.0, 0.15)
+                v_shape = np.random.uniform(0.75, 0.95) # Highly pointed bottom
+                rot_harmonic = 0.0
+            else: # stellar_activity
+                odd_even = np.random.uniform(0.0, 0.2)
+                v_shape = np.random.uniform(0.4, 0.7)
+                rot_harmonic = np.random.choice([0.0, 1.0], p=[0.2, 0.8])
+                
+            skew_val = np.random.uniform(-1.0, 1.0)
+            kurt_val = np.random.uniform(-1.0, 2.0)
+            
+        feature_vector = [snr, depth, duration, odd_even, v_shape, rot_harmonic, skew_val, kurt_val]
+        X_features.append(feature_vector)
+        y_labels.append(label)
+        
+    return np.array(X_features), np.array(y_labels)
+
+if __name__ == "__main__":
+    print("Generating synthetic astronomical feature space...")
+    X, y = generate_mock_vetting_dataset(num_samples=1200)
+    
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, stratify=y, random_state=42
+    )
+    
+    print("Training Machine Learning Vetting Classifier...")
+    vetting_classifier = RandomForestClassifier(n_estimators=100, max_depth=8, random_state=42)
+    vetting_classifier.fit(X_train, y_train)
+    
+    y_pred = vetting_classifier.predict(X_test)
+    accuracy = accuracy_score(y_test, y_pred)
+    
+    print(f"\nModel Performance Metrics:")
+    print(f"Accuracy: {accuracy:.4f}")
+    print("\nDetailed Classification Report:")
+    print(classification_report(y_test, y_pred, target_names=["False Positive (0)", "Confirmed Planet (1)"]))
+    
+    feature_importances = vetting_classifier.feature_importances_
+    feature_names = [
+        "SNR", "Depth", "Duration", "Odd-Even Mismatch", 
+        "V-Shape Metric", "Rotation Harmonic", "Skewness", "Kurtosis"
+    ]
+    
+    print("\nFeature Importance Rankings:")
+    sorted_indices = np.argsort(feature_importances)[::-1]
+    for idx in sorted_indices:
+        print(f"  {feature_names[idx]:<20}: {feature_importances[idx]:.4f}")
