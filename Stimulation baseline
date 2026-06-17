@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Exoplanet Transit Detection Pipeline</title>
+    <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f4f7f6;
+            color: #333;
+            margin: 0;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        h1, h2 {
+            text-align: center;
+            color: #2c3e50;
+        }
+        .controls {
+            display: flex;
+            justify-content: space-between;
+            background: #ecf0f1;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .control-group {
+            flex: 1;
+            margin: 0 10px;
+            display: flex;
+            flex-direction: column;
+        }
+        .control-group label {
+            font-weight: bold;
+            margin-bottom: 8px;
+        }
+        input[type=range] {
+            width: 100%;
+        }
+        .val-display {
+            text-align: center;
+            font-size: 0.9em;
+            color: #7f8c8d;
+            margin-top: 5px;
+        }
+        .plot-container {
+            width: 100%;
+            height: 300px;
+            margin-bottom: 20px;
+        }
+        .diagnostics {
+            background: #34495e;
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+            font-size: 1.2em;
+        }
+        .status-confirmed { color: #2ecc71; font-weight: bold; }
+        .status-noise { color: #e74c3c; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>AI Exoplanet Pipeline Simulator</h1>
+    
+    <div class="controls">
+        <div class="control-group">
+            <label for="radius">Planet Radius (Transit Depth)</label>
+            <input type="range" id="radius" min="0.01" max="0.15" step="0.01" value="0.08">
+            <div class="val-display" id="radius-val">0.08 (Jupiter-sized)</div>
+        </div>
+        <div class="control-group">
+            <label for="noise">White Noise Level</label>
+            <input type="range" id="noise" min="0.001" max="0.02" step="0.001" value="0.005">
+            <div class="val-display" id="noise-val">0.005 (Space Telescope)</div>
+        </div>
+        <div class="control-group">
+            <label for="period">Orbital Period (Days)</label>
+            <input type="range" id="period" min="5" max="30" step="1" value="12">
+            <div class="val-display" id="period-val">12 Days</div>
+        </div>
+    </div>
+
+    <h2>Graph A: Raw Light Curve</h2>
+    <div id="plot-raw" class="plot-container"></div>
+
+    <h2>Graph B: Detrended Light Curve</h2>
+    <div id="plot-detrended" class="plot-container"></div>
+
+    <h2>Graph C: Phase-Folded Light Curve</h2>
+    <div id="plot-folded" class="plot-container"></div>
+
+    <div class="diagnostics">
+        <div>Calculated Signal-to-Noise Ratio (SNR): <span id="snr-val">0.0</span></div>
+        <div style="margin-top: 10px;">AI Prediction Status: <span id="ai-status">Loading...</span></div>
+    </div>
+</div>
+
+<script>
+    // Utility function for generating normally distributed noise (Box-Muller transform)
+    function randomNormal() {
+        let u = 0, v = 0;
+        while(u === 0) u = Math.random();
+        while(v === 0) v = Math.random();
+        return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+    }
+
+    function generateData() {
+        const radius = parseFloat(document.getElementById('radius').value);
+        const noiseLvl = parseFloat(document.getElementById('noise').value);
+        const period = parseFloat(document.getElementById('period').value);
+
+        const depth = Math.pow(radius, 2); // Depth is proportional to area (r^2)
+        const transitDuration = 0.5; // Fixed half-day transit
+        
+        let t = [];
+        let rawFlux = [];
+        let detrendedFlux = [];
+        let foldedTime = [];
+        let foldedFlux = [];
+
+        // Generate 1500 data points over 100 days
+        for (let i = 0; i <= 100; i += 100/1500) {
+            t.push(i);
+            
+            // 1. Stellar Variability (Low-frequency sine wave simulating star spots)
+            const stellarVar = 0.015 * Math.sin(2 * Math.PI * i / 25);
+            
+            // 2. White Noise
+            const noise = noiseLvl * randomNormal();
+            
+            // 3. Transit Signal
+            let transitSignal = 0;
+            const timeSinceTransit = i % period;
+            // Center the transit at half the period
+            if (Math.abs(timeSinceTransit - (period / 2)) < (transitDuration / 2)) {
+                // Simple U-shape approximation
+                transitSignal = -depth; 
+            }
+
+            // Combine for Raw
+            const currentRaw = 1.0 + stellarVar + noise + transitSignal;
+            rawFlux.push(currentRaw);
+
+            // Simulate Pipeline Detrending (Removing stellarVar)
+            const currentDetrended = 1.0 + noise + transitSignal;
+            detrendedFlux.push(currentDetrended);
+
+            // Phase Folding
+            let phase = (i % period) / period;
+            // Center phase at 0.5
+            if (phase > 0.5) phase -= 1.0; 
+            
+            foldedTime.push(phase * period); // Scale phase back to days for readability
+        }
+
+        // Sort phase-folded data by time so lines draw correctly, or use markers
+        let foldedData = [];
+        for (let i = 0; i < t.length; i++) {
+            foldedData.push({ time: foldedTime[i], flux: detrendedFlux[i] });
+        }
+        foldedData.sort((a, b) => a.time - b.time);
+        
+        let sortedFoldedTime = foldedData.map(d => d.time);
+        let sortedFoldedFlux = foldedData.map(d => d.flux);
+
+        // Update Diagnostics
+        const transitPointsCount = (transitDuration / period) * 1500;
+        // SNR Formula roughly: Depth / (Noise / sqrt(N_transit_points))
+        const snr = depth / (noiseLvl / Math.sqrt(transitPointsCount));
+        
+        document.getElementById('snr-val').innerText = snr.toFixed(1);
+        
+        const aiStatus = document.getElementById('ai-status');
+        if (snr > 12) {
+            aiStatus.innerHTML = "<span class='status-confirmed'>Confirmed Exoplanet Transit Candidate 🪐</span>";
+        } else if (snr > 7) {
+            aiStatus.innerHTML = "<span style='color: #f39c12; font-weight: bold;'>Weak Signal - Manual Review Required ⚠️</span>";
+        } else {
+            aiStatus.innerHTML = "<span class='status-noise'>False Positive / Noise ❌</span>";
+        }
+
+        return { t, rawFlux, detrendedFlux, sortedFoldedTime, sortedFoldedFlux };
+    }
+
+    const layout = {
+        margin: { l: 50, r: 20, t: 10, b: 40 },
+        paper_bgcolor: 'rgba(0,0,0,0)',
+        plot_bgcolor: 'rgba(0,0,0,0)',
+        xaxis: { title: 'Time (Days)', gridcolor: '#e0e0e0' },
+        yaxis: { title: 'Normalized Flux', gridcolor: '#e0e0e0' },
+        showlegend: false
+    };
+
+    function updatePlots() {
+        const data = generateData();
+
+        // Trace A: Raw
+        Plotly.react('plot-raw', [{
+            x: data.t, y: data.rawFlux, mode: 'markers',
+            marker: { size: 3, color: '#3498db', opacity: 0.7 }
+        }], layout);
+
+        // Trace B: Detrended
+        Plotly.react('plot-detrended', [{
+            x: data.t, y: data.detrendedFlux, mode: 'markers',
+            marker: { size: 3, color: '#9b59b6', opacity: 0.7 }
+        }], layout);
+
+        // Trace C: Phase Folded
+        let foldedLayout = Object.assign({}, layout);
+        foldedLayout.xaxis = { title: 'Time from Mid-Transit (Days)', gridcolor: '#e0e0e0' };
+        
+        Plotly.react('plot-folded', [{
+            x: data.sortedFoldedTime, y: data.sortedFoldedFlux, mode: 'markers',
+            marker: { size: 4, color: '#e74c3c', opacity: 0.8 }
+        }], foldedLayout);
+    }
+
+    // Event Listeners for Sliders
+    document.getElementById('radius').addEventListener('input', (e) => {
+        let label = "Earth-sized";
+        if(e.target.value > 0.04) label = "Neptune-sized";
+        if(e.target.value > 0.08) label = "Jupiter-sized";
+        document.getElementById('radius-val').innerText = `${e.target.value} (${label})`;
+        updatePlots();
+    });
+
+    document.getElementById('noise').addEventListener('input', (e) => {
+        let label = "Space Telescope";
+        if(e.target.value > 0.01) label = "Ground-based Telescope";
+        document.getElementById('noise-val').innerText = `${e.target.value} (${label})`;
+        updatePlots();
+    });
+
+    document.getElementById('period').addEventListener('input', (e) => {
+        document.getElementById('period-val').innerText = `${e.target.value} Days`;
+        updatePlots();
+    });
+
+    // Initial Plot
+    updatePlots();
+</script>
+
+</body>
+</html>
