@@ -1,0 +1,63 @@
+import numpy as np
+from scipy.stats import skew, kurtosis
+from astropy.timeseries import BoxLeastSquares
+
+def calculate_transit_features(flux):
+    median_flux = np.median(flux)
+    min_flux = np.min(flux)
+    transit_depth = (median_flux - min_flux) / median_flux
+    
+    baseline_std = np.std(flux)
+    baseline_mad = np.median(np.abs(flux - median_flux))
+    
+    return {
+        "transit_depth": transit_depth,
+        "baseline_std": baseline_std,
+        "baseline_mad": baseline_mad
+    }
+
+def extract_statistical_features(flux):
+    return {
+        "mean": np.mean(flux),
+        "std": np.std(flux),
+        "skewness": skew(flux),
+        "kurtosis": kurtosis(flux)
+    }
+
+def generate_periodogram(time, flux, min_period=1.0, max_period=10.0):
+    bls = BoxLeastSquares(time, flux)
+    periodogram = bls.power(
+        periods=np.linspace(min_period, max_period, 2000),
+        duration=0.1
+    )
+    
+    best_period_index = np.argmax(periodogram.power)
+    best_period = periodogram.period[best_period_index]
+    best_power = periodogram.power[best_period_index]
+    
+    return periodogram.period, periodogram.power, best_period, best_power
+
+if __name__ == "__main__":
+    np.random.seed(42)
+    mock_time = np.linspace(0, 20, 2000)
+    mock_flux = np.ones_like(mock_time) + np.random.normal(0, 0.002, size=2000)
+    
+    for i in range(len(mock_time)):
+        if (mock_time[i] % 5.0 > 2.4) and (mock_time[i] % 5.0 < 2.6):
+            mock_flux[i] -= 0.015
+            
+    stats = extract_statistical_features(mock_flux)
+    transit_feats = calculate_transit_features(mock_flux)
+    periods, powers, best_p, best_pow = generate_periodogram(mock_time, mock_flux)
+    
+    print("Statistical Features:")
+    for k, v in stats.items():
+        print(f"  {k}: {v:.6f}")
+        
+    print("\nTransit Features:")
+    for k, v in transit_feats.items():
+        print(f"  {k}: {v:.6f}")
+        
+    print(f"\nPeriodogram Analysis:")
+    print(f"  Detected Period: {best_p:.4f} days")
+    print(f"  Signal Power: {best_pow:.4f}")
