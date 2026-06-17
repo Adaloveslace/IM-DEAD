@@ -1,0 +1,89 @@
+import numpy as np
+from astropy.timeseries import BoxLeastSquares
+
+def phase_fold_light_curve(time, flux, period, epoch):
+    phase = ((time - epoch) % period) / period
+    phase = np.where(phase > 0.5, phase - 1.0, phase)
+    sorted_indices = np.argsort(phase)
+    return phase[sorted_indices], flux[sorted_indices]
+
+def detect_transit_signals(time, flux, flux_err=None, min_period=1.0, max_period=15.0, grid_steps=5000):
+    if flux_err is None:
+        flux_err = np.ones_like(flux) * np.std(flux)
+        
+    bls = BoxLeastSquares(time, flux, dy=flux_err)
+    
+    candidate_periods = np.linspace(min_period, max_period, grid_steps)
+    transit_durations = np.linspace(0.05, 0.25, 5) # transit durations in days (1.2 to 6 hours)
+    
+    periodogram = bls.power(candidate_periods, transit_durations)
+    
+    best_idx = np.argmax(periodogram.power)
+    detected_period = periodogram.period[best_idx]
+    max_power = periodogram.power[best_idx]
+    detected_duration = periodogram.duration[best_idx]
+    detected_epoch = periodogram.transit_time[best_idx]
+    
+    mean_power = np.mean(periodogram.power)
+    std_power = np.std(periodogram.power)
+    sde = (max_power - mean_power) / std_power if std_power > 0 else 0.0
+    
+    stats = bls.compute_stats(detected_period, detected_duration, detected_epoch)
+    transit_depth = stats['depth'][0]
+    depth_uncertainty = stats['depth'][1]
+    
+    snr = transit_depth / depth_uncertainty if depth_uncertainty > 0 else 0.0
+    
+    # Astronomical standard: SDE >= 6.0 and SNR >= 5.0 indicates a robust, real signal
+    is_detected = bool(sde >= 6.0 and snr >= 5.0)
+    
+   
+    confidence_score = min(100.0, max(0.0, (sde / 12.0) * 100.0))
+    
+    folded_phase, folded_flux = phase_fold_light_curve(time, flux, detected_period, detected_epoch)
+    
+    return {
+        "detected": is_detected,
+        "period": float(detected_period),
+        "epoch": float(detected_epoch),
+        "duration": float(detected_duration),
+        "depth": float(transit_depth),
+        "sde": float(sde),
+        "snr": float(snr),
+        "confidence": float(confidence_score),
+        "folded_phase": folded_phase,
+        "folded_flux": folded_flux
+    }
+
+if __name__ == "__main__":
+    np.random.seed(42)
+    time_series = np.linspace(0, 20, 2000) 
+    
+   
+    baseline_flux = np.ones_like(time_series)
+    noise = np.random.normal(0, 0.0015, size=len(time_series))
+    
+    # 2. Inject an exoplanet transit signal (Period = 4.2 days, Epoch = 1.5, Depth = 0.008)
+    true_period = 4.2
+    true_epoch = 1.5
+    true_depth = 0.008
+    true_duration = 0.15
+    
+    for i, t in enumerate(time_series):
+        phase_offset = (t - true_epoch) % true_period
+        if phase_offset < (true_duration / 2.0) or phase_offset > (true_period - true_duration / 2.0):
+            baseline_flux[i] -= true_depth
+            
+    noisy_flux = baseline_flux + noise
+    
+    print("Initiating Pipeline Step 8: Transit Signal Detection...")
+    results = detect_transit_signals(time_series, noisy_flux)
+    
+    print("\nDetection Pipeline Output:")
+    print(f"  Transit Detected:  {results['detected']}")
+    print(f"  Estimated Period:  {results['period']:.5f} days (True: {true_period} days)")
+    print(f"  Estimated Epoch:   {results['epoch']:.5f} days (True: {true_epoch} days)")
+    print(f"  Estimated Depth:   {results['depth']:.5f} (True: {true_depth})")
+    print(f"  Detection SDE:     {results['sde']:.2f}")
+    print(f"  Signal-to-Noise:   {results['snr']:.2f}")
+    print(f"  Confidence Score:  {results['confidence']:.1f}%")
