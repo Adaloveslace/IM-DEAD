@@ -1,0 +1,66 @@
+import numpy as np
+import pandas as pd
+from astropy.stats import sigma_clip
+from scipy.signal import savgol_filter
+from scipy.interpolate import interp1d
+import statsmodels.api as sm
+
+def remove_outliers(time, flux, sigma=3.0):
+    filtered_flux = sigma_clip(flux, sigma=sigma, maxiters=5, masked=True)
+    mask = ~filtered_flux.mask
+    return time[mask], flux[mask]
+
+def detrend_polynomial(time, flux, degree=3):
+    coeffs = np.polyfit(time, flux, degree)
+    trend = np.polyval(coeffs, time)
+    return flux - trend + np.median(flux)
+
+def detrend_lowess(time, flux, frac=0.1):
+    lowess = sm.nonparametric.lowess
+    trend = lowess(flux, time, frac=frac, return_sorted=False)
+    return flux - trend + np.median(flux)
+
+def detrend_savgol(flux, window_length=151, polyorder=2):
+    if window_length % 2 == 0:
+        window_length += 1
+    trend = savgol_filter(flux, window_length, polyorder)
+    return flux - trend + np.median(flux)
+
+def normalize_zero_one(flux):
+    min_val = np.min(flux)
+    max_val = np.max(flux)
+    return (flux - min_val) / (max_val - min_val)
+
+def interpolate_gaps(time, flux, cadence_minutes=2.0):
+    cadence_days = cadence_minutes / (24.0 * 60.0)
+    uniform_time = np.arange(time[0], time[-1], cadence_days)
+    f = interp1d(time, flux, kind='linear', fill_value="extrapolate")
+    uniform_flux = f(uniform_time)
+    return uniform_time, uniform_flux
+
+if __name__ == "__main__":
+    np.random.seed(42)
+    mock_time = np.linspace(0, 10, 1000)
+    mock_trend = 0.05 * (mock_time - 5)**2
+    mock_transit = np.zeros_like(mock_time)
+    mock_transit[(mock_time > 4.5) & (mock_time < 4.7)] = -0.02
+    mock_noise = np.random.normal(0, 0.005, size=1000)
+    mock_flux = 1.0 + mock_trend + mock_transit + mock_noise
+    
+    mock_flux[100] = 2.5
+    mock_flux[500] = -0.5
+    
+    print(f"Original shape: {mock_flux.shape}")
+    
+    clean_time, clean_flux = remove_outliers(mock_time, mock_flux, sigma=3.0)
+    print(f"Shape after outlier removal: {clean_flux.shape}")
+    
+    detrended_poly = detrend_polynomial(clean_time, clean_flux, degree=2)
+    detrended_lowess = detrend_lowess(clean_time, clean_flux, frac=0.05)
+    detrended_savgol = detrend_savgol(clean_flux, window_length=101, polyorder=2)
+    
+    normalized_flux = normalize_zero_one(detrended_savgol)
+    print(f"Normalized Flux Range: [{np.min(normalized_flux):.2f}, {np.max(normalized_flux):.2f}]")
+    
+    uniform_time, uniform_flux = interpolate_gaps(clean_time, detrended_savgol, cadence_minutes=14.4)
+    print(f"Final uniformly sampled shape: {uniform_flux.shape}")
