@@ -1,0 +1,95 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.metrics import roc_curve, auc, confusion_matrix, ConfusionMatrixDisplay
+
+def compute_metrics(y_true, y_pred, y_probs):
+    acc = accuracy_score(y_true, y_pred)
+    prec = precision_score(y_true, y_pred)
+    rec = recall_score(y_true, y_pred)
+    f1 = f1_score(y_true, y_pred)
+    fpr, tpr, _ = roc_curve(y_true, y_probs)
+    roc_auc = auc(fpr, tpr)
+    
+    metrics_dict = {
+        "accuracy": acc,
+        "precision": prec,
+        "recall": rec,
+        "f1_score": f1,
+        "auc": roc_auc
+    }
+    return metrics_dict, fpr, tpr
+
+def plot_evaluation_charts(y_true, y_pred, fpr, tpr, roc_auc):
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    
+    axes[0].plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (area = {roc_auc:.4f})')
+    axes[0].plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+    axes[0].set_xlim([0.0, 1.0])
+    axes[0].set_ylim([0.0, 1.05])
+    axes[0].set_xlabel('False Positive Rate')
+    axes[0].set_ylabel('True Positive Rate')
+    axes[0].set_title('Receiver Operating Characteristic (ROC) Curve')
+    axes[0].legend(loc="lower right")
+    axes[0].grid(True, linestyle=':', alpha=0.6)
+    
+    cm = confusion_matrix(y_true, y_pred)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=['No Transit', 'Transit'])
+    disp.plot(ax=axes[1], cmap=plt.cm.Blues, values_format='d')
+    axes[1].set_title('Confusion Matrix')
+    
+    plt.tight_layout()
+    plt.savefig('evaluation_metrics.png', dpi=300)
+    plt.close()
+
+def visualize_lightcurve_predictions(X, y_true, y_probs, y_pred, num_examples=4):
+    fig, axes = plt.subplots(num_examples, 1, figsize=(12, 2.5 * num_examples), sharex=True)
+    time = np.arange(X.shape[2])
+    
+    for i in range(num_examples):
+        ax = axes[i]
+        flux = X[i, 0, :]
+        true_label = y_true[i]
+        pred_label = y_pred[i]
+        prob = y_probs[i]
+        
+        color = 'green' if true_label == pred_label else 'red'
+        status = "Correct" if true_label == pred_label else "Incorrect"
+        
+        ax.plot(time, flux, color='black', alpha=0.6, label='Light Curve')
+        ax.set_title(f"Instance {i} | True: {int(true_label)} | Pred: {int(pred_label)} (Prob: {prob:.4f}) | {status}", color=color)
+        ax.set_ylabel("Normalized Flux")
+        ax.grid(True, linestyle=':', alpha=0.5)
+        
+    axes[-1].set_xlabel("Time Index / Cadence")
+    plt.tight_layout()
+    plt.savefig('predictions_vs_actual.png', dpi=300)
+    plt.close()
+
+if __name__ == "__main__":
+    np.random.seed(42)
+    num_samples = 500
+    seq_len = 200
+    
+    y_true = np.random.choice([0, 1], size=(num_samples,), p=[0.85, 0.15])
+    X = np.random.normal(1.0, 0.01, size=(num_samples, 1, seq_len))
+    
+    for i in range(num_samples):
+        if y_true[i] == 1:
+            X[i, 0, 70:110] -= 0.03
+            
+    noise = np.random.normal(0, 0.15, size=(num_samples,))
+    y_probs = 1.0 / (1.0 + np.exp(-( (y_true - 0.5) * 3.0 + noise )))
+    y_pred = (y_probs >= 0.5).astype(int)
+    
+    metrics, fpr, tpr = compute_metrics(y_true, y_pred, y_probs)
+    
+    print("Pipeline Classification Report:")
+    for k, v in metrics.items():
+        print(f"  {k.capitalize()}: {v:.4f}")
+        
+    plot_evaluation_charts(y_true, y_pred, fpr, tpr, metrics['auc'])
+    print("\n--> Saved metrics plots as 'evaluation_metrics.png'")
+    
+    visualize_lightcurve_predictions(X, y_true, y_probs, y_pred, num_examples=4)
+    print("--> Saved light curve prediction predictions as 'predictions_vs_actual.png'")
