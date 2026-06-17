@@ -1,0 +1,101 @@
+import os
+import io
+import h5py
+import numpy as np
+import pandas as pd
+import requests
+from astropy.io import fits
+from astropy.table import Table
+from astroquery.mast import Catalogs, Observations
+
+def query_tic_catalog(tic_id: int) -> pd.DataFrame:
+    print(f"[API] Fetching TIC metadata for TIC {tic_id}...")
+    catalog_data = Catalogs.query_object(f"TIC {tic_id}", catalog="TIC", radius="0.001 deg")
+    df_tic = catalog_data.to_pandas()
+    df_exact = df_tic[df_tic['ID'] == str(tic_id)]
+    if df_exact.empty:
+         df_exact = df_tic.head(1)
+    print(f"--> Target Found. Star Radius: {df_exact['rad'].values[0]} R_sun | Teff: {df_exact['Teff'].values[0]} K")
+    return df_exact
+
+def download_tess_fits_lightcurve(tic_id: int, download_dir: str = "./data") -> str:
+    os.makedirs(download_dir, exist_ok=True)
+    print(f"[API] Searching MAST for Light Curve observations matching TIC {tic_id}...")
+    obs_table = Observations.query_object(f"TIC {tic_id}", radius="0.001 deg")
+    tess_obs = obs_table[
+        (obs_table['project'] == 'TESS') & 
+        (obs_table['obs_collection'] == 'TESS')
+    ]
+    if len(tess_obs) == 0:
+        raise FileNotFoundError(f"No TESS data products found on MAST for TIC {tic_id}")
+    data_products = Observations.get_product_list(tess_obs[0])
+    filtered_products = Observations.filter_products(
+        data_products, 
+        productSubGroupDescription="lc", 
+        extension="fits"
+    )
+    if len(filtered_products) == 0:
+        raise FileNotFoundError("Target observations match, but no valid 'lc.fits' tracks found.")
+    print(f"--> Downloading Data Product: {filtered_products['productFilename'][0]}...")
+    download_manifest = Observations.download_products(filtered_products[0], download_dir=download_dir)
+    local_path = download_manifest['Local Path'][0]
+    return local_path
+
+def load_fits_format(file_path: str) -> tuple:
+    print(f"[LOAD] Parsing FITS structure from: {file_path}")
+    with fits.open(file_path) as hdul:
+        data_table = Table.read(hdul[1])
+        time = np.array(data_table['TIME'])
+        raw_flux = np.array(data_table['SAP_FLUX'])
+        corrected_flux = np.array(data_table['PDCSAP_FLUX'])
+        flux_err = np.array(data_table['PDCSAP_FLUX_ERR'])
+        valid_indices = ~np.isnan(time) & ~np.isnan(corrected_flux)
+    return time[valid_indices], raw_flux[valid_indices], corrected_flux[valid_indices], flux_err[valid_indices]
+
+def load_csv_from_nexsci_api(planet_name: str) -> pd.DataFrame:
+    print(f"[API] Fetching ephemeris data for {planet_name} from NEXScI API...")
+    base_url = "https://exoplanetarchive.ipac.caltech.edu/TAP/sync"
+    query = f"select pl_name, pl_orbper, pl_trandep, pl_tranmid from pscomppars where pl_name = '{planet_name}'"
+    params = {
+        "query": query,
+        "format": "csv"
+    }
+    response = requests.get(base_url, params=params)
+    if response.status_code == 200 and not response.text.startswith("ERROR"):
+        df_ephem = pd.read_csv(io.StringIO(response.text))
+        return df_ephem
+    else:
+        raise RuntimeError(f"NEXScI API Error: {response.text}")
+
+def save_and_load_hdf5_custom_survey(filename: str, time: np.array, flux: np.array, target_name: str):
+    print(f"[STORAGE] Exporting high-speed local archive format to HDF5 container...")
+    with h5py.File(filename, 'w') as h5f:
+        group = h5f.create_group("light_curves")
+        group.create_dataset("time", data=time, compression="gzip", compression_opts=4)
+        group.create_dataset("flux", data=flux, compression="gzip", compression_opts=4)
+        group.attrs["target_id"] = target_name
+
+    print(f"[LOAD] Parsing sequential data back out of HDF5 binary matrix storage...")
+    with h5py.File(filename, 'r') as h5f:
+        read_time = h5f["light_curves/time"][:]
+        read_flux = h5f["light_curves/flux"][:]
+        target_id = h5f["light_curves"].attrs["target_id"]
+    print(f"--> Successfully loaded HDF5 matrix: {target_id} ({len(read_time)} data points)")
+    return read_time, read_flux
+
+if __name__ == "__main__":
+    target_tic = 25155310
+    planet_name = "WASP-126 b"
+    try:
+        tic_metadata = query_tic_catalog(target_tic)
+        ground_truth = load_csv_from_nexsci_api(planet_name)
+        print("\n[GROUND TRUTH METADATA FROM NEXScI]:")
+        print(ground_truth.to_string(index=False))
+        local_fits_path = download_tess_fits_lightcurve(target_tic)
+        time, raw_flux, clean_flux, flux_err = load_fits_format(local_fits_path)
+        print(f"--> Extracted {len(time)} valid cadences from FITS container.\n")
+        hdf5_filename = f"./data/target_tic_{target_tic}.h5"
+        h5_time, h5_flux = save_and_load_hdf5_custom_survey(hdf5_filename, time, clean_flux, planet_name)
+        print("\n[SUCCESS] Step 1 Complete: All arrays loaded and ready for Step 2 (Detrending).")
+    except Exception as e:
+        print(f"\n[PIPELINE FAILURE] Error encountered during gathering stage: {e}")
