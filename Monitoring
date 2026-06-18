@@ -1,0 +1,173 @@
+import json
+import os
+import random
+import time
+from typing import Dict, Any, List
+
+class ABTestingRouter:
+    def __init__(self, models_config: Dict[str, float]):
+        self.models_config = models_config
+        self._validate_weights()
+
+    def _validate_weights(self):
+        total_weight = sum(self.models_config.values())
+        if not np.isclose(total_weight, 1.0):
+            self.models_config = {k: v / total_weight for k, v in self.models_config.items()}
+
+    def route_target(self, tic_id: int) -> str:
+      
+        random.seed(tic_id)
+        rand_val = random.random()
+        cumulative = 0.0
+        for model_name, weight in self.models_config.items():
+            cumulative += weight
+            if rand_val <= cumulative:
+                return model_name
+        return list(self.models_config.keys())[-1]
+
+
+class PipelineMonitor:
+    def __init__(self, log_filepath: str = "pipeline_telemetry.json", retraining_pool_path: str = "retraining_pool.json"):
+        self.log_filepath = log_filepath
+        self.retraining_pool_path = retraining_pool_path
+        self.telemetry = self._load_data(self.log_filepath)
+        self.retraining_pool = self._load_data(self.retraining_pool_path)
+
+    def _load_data(self, filepath: str) -> List[Dict[str, Any]]:
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, 'r') as f:
+                    return json.load(f)
+            except json.JSONDecodeError:
+                return []
+        return []
+
+    def _save_data(self, data: List[Dict[str, Any]], filepath: str):
+        with open(filepath, 'w') as f:
+            json.dump(data, f, indent=4)
+
+    def log_inference(self, tic_id: int, model_version: str, predicted_class: int, confidence: float, features: Dict[str, float]):
+        entry = {
+            "tic_id": tic_id,
+            "timestamp": time.time(),
+            "model_version": model_version,
+            "predicted_class": predicted_class,
+            "confidence": confidence,
+            "features": features,
+            "human_verified_class": None,
+            "vetted_by": None
+        }
+        self.telemetry.append(entry)
+        self._save_data(self.telemetry, self.log_filepath)
+
+    def submit_human_vetting(self, tic_id: int, verified_class: int, expert_username: str):
+        updated = False
+        for entry in self.telemetry:
+            if entry["tic_id"] == tic_id and entry["human_verified_class"] is None:
+                entry["human_verified_class"] = verified_class
+                entry["vetted_by"] = expert_username
+                updated = True
+               
+                if entry["predicted_class"] != verified_class:
+                    self._harvest_for_retraining(entry)
+                break
+        
+        if updated:
+            self._save_data(self.telemetry, self.log_filepath)
+            print(f"[MONITOR] Log updated for TIC {tic_id}. Human label: {verified_class} recorded.")
+        else:
+            print(f"[MONITOR] No pending unverified telemetry entries found for TIC {tic_id}.")
+
+    def _harvest_for_retraining(self, entry: Dict[str, Any]):
+       
+        if any(item["tic_id"] == entry["tic_id"] for item in self.retraining_pool):
+            return
+            
+        harvest_entry = {
+            "tic_id": entry["tic_id"],
+            "features": entry["features"],
+            "correct_label": entry["human_verified_class"],
+            "model_failed": entry["model_version"],
+            "failure_mode": "False Positive" if entry["predicted_class"] == 1 else "False Negative",
+            "added_to_pool_at": time.time()
+        }
+        self.retraining_pool.append(harvest_entry)
+        self._save_data(self.retraining_pool, self.retraining_pool_path)
+        print(f"[ACTIVE LEARNING] Captured {harvest_entry['failure_mode']} for TIC {entry['tic_id']}. Added to retraining pool.")
+
+    def calculate_performance_report(self, model_version: str) -> Dict[str, float]:
+        verified_entries = [
+            e for e in self.telemetry 
+            if e["model_version"] == model_version and e["human_verified_class"] is not None
+        ]
+        
+        if not verified_entries:
+            return {"accuracy": 0.0, "precision": 0.0, "recall": 0.0, "sample_size": 0}
+
+        tp = fp = tn = fn = 0
+        for entry in verified_entries:
+            pred = entry["predicted_class"]
+            true = entry["human_verified_class"]
+            
+            if pred == 1 and true == 1:
+                tp += 1
+            elif pred == 1 and true == 0:
+                fp += 1
+            elif pred == 0 and true == 0:
+                tn += 1
+            elif pred == 0 and true == 1:
+                fn += 1
+
+        accuracy = (tp + tn) / len(verified_entries)
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        
+        return {
+            "accuracy": accuracy,
+            "precision": precision,
+            "recall": recall,
+            "sample_size": len(verified_entries)
+        }
+
+if __name__ == "__main__":
+    import numpy as np # import needed for validating A/B route normalization
+
+    router = ABTestingRouter({"v1.0_baseline": 0.8, "v2.0_experimental": 0.2})
+    monitor = PipelineMonitor()
+
+    test_star_ids = [25155310, 31415926, 42345678, 55566677]
+    
+    print("--- 1. INFERENCE AND ROUTING STAGE ---")
+    for tic_id in test_star_ids:
+        assigned_model = router.route_target(tic_id)
+        
+        mock_features = {"std": 0.002, "skewness": -0.85}
+        mock_predicted_class = 1 if tic_id in [25155310, 42345678] else 0
+        mock_confidence = 0.94
+        
+        monitor.log_inference(
+            tic_id=tic_id,
+            model_version=assigned_model,
+            predicted_class=mock_predicted_class,
+            confidence=mock_confidence,
+            features=mock_features
+        )
+        print(f"Target TIC {tic_id} routed to {assigned_model}. Predicted Class: {mock_predicted_class}")
+
+    print("\n--- 2. HUMAN FEEDBACK LOOP (VETTING STAGE) ---")
+  
+    monitor.submit_human_vetting(tic_id=25155310, verified_class=1, expert_username="Dr_A_Sagan")
+  
+    monitor.submit_human_vetting(tic_id=42345678, verified_class=0, expert_username="Dr_A_Sagan")
+
+    print("\n--- 3. A/B TEST METRICS PERFORMANCE REPORT ---")
+    for model_name in ["v1.0_baseline", "v2.0_experimental"]:
+        stats = monitor.calculate_performance_report(model_name)
+        print(f"Performance Metrics for {model_name}:")
+        print(f"  Sample Size: {stats['sample_size']}")
+        print(f"  Accuracy:    {stats['accuracy']:.2f}")
+        print(f"  Precision:   {stats['precision']:.2f}")
+        print(f"  Recall:      {stats['recall']:.2f}")
+
+  
+    print(f"\nRetraining Dataset Pool Size: {len(monitor.retraining_pool)} misclassifications logged.")
